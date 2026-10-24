@@ -9,3 +9,7 @@
   prochain message (ou par le cache d'état).
 - **Vérifié sur du vrai matériel** (octobre 2026) : capteur d'ouverture HOBEIAN ZG-102ZA, `contact`
   suit l'état réel (`true` = fermée) ; firmware non relevé.
+- **Vérifié sur du vrai matériel** (octobre 2026) : volets SONOFF MINI-ZBRBS et Lonsonho
+  QS-Zigbee-C03, ouvrir / stop / fermer et curseur depuis le tableau de bord, la position suit
+  Z2M ; firmware non relevé. `moving` vaut `UP` / `DOWN` chez Lonsonho et `forward` / `reverse`
+  chez SONOFF.
