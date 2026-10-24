@@ -200,6 +200,14 @@ fn lookup<'a>(payload: &'a Map<String, Json>, key: &str) -> Option<&'a Json> {
     Some(current)
 }
 
+/// The order point of a shutter, blind or curtain: an enum that opens and
+/// closes (`OPEN` / `CLOSE` / `STOP`), whatever the case it is spelled in.
+fn is_shutter_order(kind: &Kind) -> bool {
+    matches!(kind, Kind::Enum { values }
+        if values.iter().any(|v| v.eq_ignore_ascii_case("open"))
+            && values.iter().any(|v| v.eq_ignore_ascii_case("close")))
+}
+
 fn flatten(
     expose: &RawExpose,
     prefix: &str,
@@ -270,6 +278,11 @@ fn flatten(
     // A calibration offset in °C is configuration, not a temperature reading.
     let semantic = if expose.category.as_deref() == Some("config") {
         Semantic::Config
+    } else if is_shutter_order(&kind) {
+        // A shutter's `state` (OPEN / CLOSE / STOP) is an order, not a
+        // switch: read as one it shows « off » while the shutter is open,
+        // and a click on it would send `ON`. Its opening is `position`.
+        Semantic::Other
     } else {
         Semantic::infer(&key, unit.as_ref())
     };
@@ -373,7 +386,7 @@ mod tests {
     #[test]
     fn real_bridge_is_fully_mapped() {
         let catalog = catalog();
-        assert_eq!(catalog.len(), 7, "coordinator excluded, 7 real devices");
+        assert_eq!(catalog.len(), 8, "coordinator excluded, 8 real devices");
         for entry in catalog.entries() {
             assert!(
                 !entry.device.points.is_empty(),
@@ -491,6 +504,56 @@ mod tests {
         assert_eq!(
             pir.device.point("illuminance_interval").unwrap().unit,
             Some(Unit::Minute)
+        );
+    }
+
+    #[test]
+    fn shutter_is_a_position_not_a_switch() {
+        let catalog = catalog();
+        let shutter = catalog.by_name("0x00124b0000000002").unwrap();
+        let semantic = |key: &str| shutter.device.point(key).unwrap().semantic;
+
+        assert_eq!(semantic("position"), Semantic::Position);
+        // `state` is an order (OPEN / CLOSE / STOP), not an on/off switch.
+        assert_eq!(semantic("state"), Semantic::Other);
+        assert_eq!(semantic("moving"), Semantic::Other);
+        assert!(
+            shutter
+                .device
+                .points
+                .iter()
+                .all(|p| p.semantic != Semantic::OnOff),
+            "nothing on a shutter reads as a switch"
+        );
+
+        let position = shutter.device.point("position").unwrap();
+        assert!(position.access.write);
+        assert_eq!(position.unit, Some(Unit::Percent));
+        let Kind::Numeric { min, max, .. } = &position.kind else {
+            panic!("position is numeric");
+        };
+        assert_eq!((*min, *max), (Some(0.0), Some(100.0)));
+    }
+
+    #[test]
+    fn shutter_state_decodes_and_its_orders_encode() {
+        let catalog = catalog();
+        let shutter = catalog.by_name("0x00124b0000000002").unwrap();
+        let values: HashMap<_, _> = shutter
+            .decode(&state("0x00124b0000000002"))
+            .into_iter()
+            .collect();
+        assert_eq!(values["position"], Value::Int(32));
+        assert_eq!(values["state"], Value::from("OPEN"));
+        assert_eq!(values["moving"], Value::from("STOP"));
+
+        assert_eq!(
+            shutter.encode("position", &Value::Float(50.0)),
+            json!({"position": 50})
+        );
+        assert_eq!(
+            shutter.encode("state", &Value::from("CLOSE")),
+            json!({"state": "CLOSE"})
         );
     }
 

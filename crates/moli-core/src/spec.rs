@@ -148,6 +148,9 @@ pub enum Semantic {
     BatteryLow,
     SignalStrength,
     Contact,
+    /// How far a shutter, blind or curtain is open, in %: 100 = fully open,
+    /// 0 = fully closed (the convention of Zigbee2MQTT and of the dashboard).
+    Position,
     Occupancy,
     WaterLeak,
     Smoke,
@@ -191,6 +194,7 @@ impl Semantic {
             "battery_low" => Self::BatteryLow,
             "linkquality" | "rssi" => Self::SignalStrength,
             "contact" => Self::Contact,
+            "position" => Self::Position,
             "occupancy" | "presence" | "motion" => Self::Occupancy,
             "water_leak" => Self::WaterLeak,
             "smoke" => Self::Smoke,
@@ -309,6 +313,11 @@ mod tests {
             Semantic::SignalStrength
         );
         assert_eq!(Semantic::infer("color.x", None), Semantic::Color);
+        assert_eq!(
+            Semantic::infer("position", Some(&Unit::Percent)),
+            Semantic::Position,
+            "how far a shutter is open"
+        );
         assert_eq!(Semantic::infer("whatever", None), Semantic::Other);
     }
 
