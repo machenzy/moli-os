@@ -13,3 +13,6 @@
   QS-Zigbee-C03, ouvrir / stop / fermer et curseur depuis le tableau de bord, la position suit
   Z2M ; firmware non relevé. `moving` vaut `UP` / `DOWN` chez Lonsonho et `forward` / `reverse`
   chez SONOFF.
+- **Vérifié sur du vrai matériel** (octobre 2026) : ampoules Moes ZB-TD5-RCW-GU10 et Tuya
+  CK-BL702-AL-01, luminosité en % (100 % envoie le niveau 254, 50 % le niveau 127) ; firmware non
+  relevé.
