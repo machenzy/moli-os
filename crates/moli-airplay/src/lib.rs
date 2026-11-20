@@ -48,6 +48,9 @@ pub struct Config {
     /// Where `announce_volume` starts, 0–100; once written, the point is kept.
     #[serde(default = "default_volume")]
     pub volume: u8,
+    /// Says nothing during the house's quiet hours (`[guard.quiet_hours]`).
+    #[serde(default)]
+    pub quiet_hours: bool,
 }
 
 fn default_port() -> u16 {
@@ -250,7 +253,8 @@ async fn run(config: &Config, mdns_port: u16, ctx: &mut DriverCtx) -> anyhow::Re
         config.speech(),
         config.volume,
         ctx.media_publisher(),
-    )));
+    )))
+    .keeping_quiet_hours(config.quiet_hours);
     ctx.upsert_device(device(ctx, &id, host, &announcements));
     announcements.start(ctx, &id);
     // What the receiver says of itself: one that will not take plain
@@ -556,6 +560,7 @@ mod tests {
             tts: moli_announce::default_tts(),
             voice: None,
             volume: 40,
+            quiet_hours: false,
         };
         let mut driver = Airplay::new(config);
         driver.mdns_port = fake.mdns;

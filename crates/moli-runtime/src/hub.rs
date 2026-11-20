@@ -974,6 +974,17 @@ impl Hub {
             .is_some_and(|p| p.semantic == moli_core::Semantic::Control)
     }
 
+    /// The quiet hours (`[guard.quiet_hours]`) over this device now, as
+    /// the house reads them (`22:00 → 07:00`): for a driver that keeps quiet
+    /// then (an announcement), whoever asked.
+    #[must_use]
+    pub fn quiet_hours_now(&self, device: &DeviceId) -> Option<String> {
+        let quiet = self.0.opts.guard.quiet_hours.as_ref()?;
+        let rooms = self.rooms_of(device);
+        let rooms: Vec<&str> = rooms.iter().map(String::as_str).collect();
+        quiet.now_for(&rooms, jiff::Timestamp::now())
+    }
+
     /// Every room an order on this device reaches: its own (user label and
     /// source system's room) and, for a group, those of each member. All
     /// count for protection.

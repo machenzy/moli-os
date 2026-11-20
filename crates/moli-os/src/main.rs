@@ -1384,6 +1384,7 @@ const KINDS: &[&str] = &[
     "alexa",
     "sonos",
     "airplay",
+    "cast",
     "reolink",
     "tuya",
     "helpers",
@@ -1689,6 +1690,9 @@ fn build_driver(
             config.options.clone().try_into().with_context(context)?,
         )),
         "airplay" => Arc::new(moli_airplay::Airplay::new(
+            config.options.clone().try_into().with_context(context)?,
+        )),
+        "cast" => Arc::new(moli_cast::Cast::new(
             config.options.clone().try_into().with_context(context)?,
         )),
         "reolink" => Arc::new(moli_reolink::Reolink::new(
