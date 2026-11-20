@@ -6,28 +6,21 @@
 
 use std::time::Duration;
 
-use anyhow::{Context as _, bail};
+use anyhow::Context as _;
 use moli_net::PinnedTls;
 use serde_json::{Value as Json, json};
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::mpsc;
 
-use crate::proto::{Writer, parse};
-
-pub const PORT: u16 = 8009;
-const SENDER: &str = "sender-moli";
-const RECEIVER: &str = "receiver-0";
-const NS_CONNECTION: &str = "urn:x-cast:com.google.cast.tp.connection";
-const NS_HEARTBEAT: &str = "urn:x-cast:com.google.cast.tp.heartbeat";
-const NS_RECEIVER: &str = "urn:x-cast:com.google.cast.receiver";
-const NS_MEDIA: &str = "urn:x-cast:com.google.cast.media";
+pub use moli_net::cast::PORT;
+use moli_net::cast::{
+    NS_CONNECTION, NS_HEARTBEAT, NS_MEDIA, NS_RECEIVER, RECEIVER, envelope, read_frame, send,
+};
 /// Heartbeat and receiver status: the app's media is asked less often
 /// (its changes come by themselves).
 const POLL: Duration = Duration::from_secs(10);
 const MEDIA_EVERY: u32 = 6;
 /// The receiver answers every heartbeat: this long silent, it is gone.
 const QUIET: Duration = Duration::from_secs(35);
-const MAX_MESSAGE: usize = 256 * 1024;
 
 /// What the screen shows, as Cast knows it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -234,45 +227,6 @@ impl Follow {
     }
 }
 
-/// A message's sender, namespace and JSON payload.
-fn envelope(frame: &[u8]) -> Option<(String, String, Json)> {
-    let m = parse(frame)?;
-    let body = serde_json::from_str(m.str(6)?).ok()?;
-    Some((m.str(2)?.to_owned(), m.str(4)?.to_owned(), body))
-}
-
-async fn send<W: AsyncWrite + Unpin>(
-    write: &mut W,
-    destination: &str,
-    namespace: &str,
-    payload: &Json,
-) -> anyhow::Result<()> {
-    let message = Writer::new()
-        .uint(1, 0)
-        .str(2, SENDER)
-        .str(3, destination)
-        .str(4, namespace)
-        .uint(5, 0)
-        .str(6, &payload.to_string())
-        .finish();
-    let len = u32::try_from(message.len()).context("message too long")?;
-    let mut frame = len.to_be_bytes().to_vec();
-    frame.extend_from_slice(&message);
-    write.write_all(&frame).await?;
-    write.flush().await?;
-    Ok(())
-}
-
-async fn read_frame<R: AsyncRead + Unpin>(read: &mut R) -> anyhow::Result<Vec<u8>> {
-    let len = usize::try_from(read.read_u32().await?)?;
-    if len > MAX_MESSAGE {
-        bail!("message of {len} bytes from the TV");
-    }
-    let mut frame = vec![0; len];
-    read.read_exact(&mut frame).await?;
-    Ok(frame)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,26 +273,5 @@ mod tests {
         assert_eq!(f.receiver(&receiver(&idle)), None);
         assert_eq!(f.playing, Playing::default());
         assert_eq!(f.transport, None);
-    }
-
-    #[tokio::test]
-    async fn envelopes_round_trip() {
-        let (mut a, mut b) = tokio::io::duplex(4096);
-        send(
-            &mut a,
-            "t-1",
-            NS_MEDIA,
-            &json!({ "type": "PAUSE", "mediaSessionId": 7 }),
-        )
-        .await
-        .unwrap();
-        let frame = read_frame(&mut b).await.unwrap();
-        let m = parse(&frame).unwrap();
-        assert_eq!(m.str(3), Some("t-1"));
-        assert_eq!(m.str(4), Some(NS_MEDIA));
-        // The sender is us: an envelope read back names it.
-        let (source, namespace, body) = envelope(&frame).unwrap();
-        assert_eq!((source.as_str(), namespace.as_str()), (SENDER, NS_MEDIA));
-        assert_eq!(body["mediaSessionId"], 7);
     }
 }

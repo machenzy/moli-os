@@ -41,6 +41,9 @@ pub struct Config {
     /// `announce_volume` point starts; once written, the point is kept.
     #[serde(default = "default_volume")]
     pub volume: u8,
+    /// Says nothing during the house's quiet hours (`[guard.quiet_hours]`).
+    #[serde(default)]
+    pub quiet_hours: bool,
 }
 
 fn default_volume() -> u8 {

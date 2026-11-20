@@ -1,0 +1,26 @@
+[integration]
+id = "cast"
+name = "Enceintes Google Cast (annonces)"
+brands = ["Google"]
+# The one speaker heard so far (in the reference home).
+models = ["Google Home Mini"]
+transport = "tcp"
+driver = "cast"
+crate = "moli-cast"
+
+[discovery]
+# Chromecasts, Android TVs and Cast-enabled TVs answer `_googlecast._tcp`
+# too: propose a speaker only (its TXT `md`, e.g. `Google Home Mini`).
+mdns = ["_googlecast._tcp"]
+ssdp = []
+# Cast v2 over TLS on 8009; the speaker then fetches the sound from Moli.
+ports = [8009]
+
+[needs]
+secrets = []
+vars = []
+options = ["host", "media_base"]
+
+[origin]
+reused = "le protocole Cast v2 de moli-androidtv, la séquence de tts.speak de Home Assistant (pychromecast) et de Gladys-Google-Cast"
+author = "agent"
