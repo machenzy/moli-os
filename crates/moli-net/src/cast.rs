@@ -2,6 +2,12 @@
 //! the frames (a 4-byte length, then a small protobuf envelope around
 //! JSON), and an announcement said through the Default Media Receiver.
 //!
+//! The device's TLS certificate is its own, regenerated now and then (daily,
+//! at each restart): it cannot be pinned. What is pinned is its identity, the
+//! certificate it presents through DeviceAuth (as supermomo31's Cast work
+//! for #129 does it): each connection, it signs a fresh nonce and its TLS
+//! certificate of the moment with that identity's key.
+//!
 //! An announcement, as Home Assistant's `tts.speak` and Gladys do it: the
 //! receiver's volume is read, the announcement's level set, the Default
 //! Media Receiver launched (what played stops), the sound loaded from the
@@ -18,6 +24,8 @@ use tokio::sync::mpsc;
 use crate::PinnedTls;
 use crate::proto::{Writer, parse};
 
+type Stream = tokio_rustls::client::TlsStream<tokio::net::TcpStream>;
+
 pub const PORT: u16 = 8009;
 pub const SENDER: &str = "sender-moli";
 pub const RECEIVER: &str = "receiver-0";
@@ -25,6 +33,7 @@ pub const NS_CONNECTION: &str = "urn:x-cast:com.google.cast.tp.connection";
 pub const NS_HEARTBEAT: &str = "urn:x-cast:com.google.cast.tp.heartbeat";
 pub const NS_RECEIVER: &str = "urn:x-cast:com.google.cast.receiver";
 pub const NS_MEDIA: &str = "urn:x-cast:com.google.cast.media";
+pub const NS_AUTH: &str = "urn:x-cast:com.google.cast.tp.deviceauth";
 /// Google's Default Media Receiver: plays a URL, on every Cast device.
 pub const DEFAULT_MEDIA_RECEIVER: &str = "CC1AD845";
 const MAX_MESSAGE: usize = 256 * 1024;
@@ -79,30 +88,131 @@ pub async fn read_frame<R: AsyncRead + Unpin>(read: &mut R) -> anyhow::Result<Ve
     Ok(frame)
 }
 
-/// Says the sound at `url` (one the device fetches) at `level` (0–1), the
-/// device's own volume put back afterwards, within `limit`. `started` as
-/// the device starts playing it.
-///
-/// # Errors
-/// The device is unreachable, refused the app or the sound, or the sound
-/// did not end in time.
-pub async fn say(
-    tls: &PinnedTls,
-    host: &str,
-    port: u16,
-    url: &str,
-    level: f64,
-    limit: Duration,
-    started: impl FnMut() + Send,
-) -> anyhow::Result<()> {
-    let stream = tls.connect(host, port).await.context("cast")?;
-    say_on(stream, url, level, limit, started).await
+/// Who answered, as DeviceAuth proved it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Identity {
+    /// The identity certificate's fingerprint: what is pinned.
+    pub fingerprint: String,
+    /// Its validity as written (not before, not after).
+    pub valid: Option<(String, String)>,
+    /// The TLS certificate's validity, for comparison.
+    pub tls_valid: Option<(String, String)>,
 }
 
-/// [`say`] on a connection already open.
+/// A connection to the device, its identity checked against `identity`
+/// (or, without one, the identity it presents taken as its own: the first
+/// contact).
 ///
 /// # Errors
-/// As [`say`].
+/// The device is unreachable, or another device answered.
+pub async fn connect(
+    host: &str,
+    port: u16,
+    identity: Option<&str>,
+) -> anyhow::Result<(Stream, Identity)> {
+    // The TLS certificate changes by itself: DeviceAuth vouches for it.
+    let tls = PinnedTls::new(None)?;
+    let mut stream = tls.connect(host, port).await.context("cast")?;
+    let cert = stream
+        .get_ref()
+        .1
+        .peer_certificates()
+        .and_then(|chain| chain.first())
+        .context("no TLS certificate from the Cast device")?
+        .as_ref()
+        .to_vec();
+    let who = tokio::time::timeout(
+        Duration::from_secs(5),
+        authenticate(&mut stream, identity, &cert),
+    )
+    .await
+    .context("Cast authentication timeout")??;
+    Ok((stream, who))
+}
+
+/// DeviceAuth: a fresh nonce, the device's signature over it and over the
+/// TLS certificate of the connection.
+async fn authenticate<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    pin: Option<&str>,
+    tls_cert: &[u8],
+) -> anyhow::Result<Identity> {
+    use ring::rand::{SecureRandom as _, SystemRandom};
+    let mut nonce = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut nonce)
+        .map_err(|_| anyhow::anyhow!("no nonce for the Cast authentication"))?;
+    // DeviceAuthMessage { challenge { signature_algorithm: RSASSA_PKCS1v15,
+    // sender_nonce, hash_algorithm: SHA256 } }, as a binary payload.
+    let challenge = Writer::new()
+        .msg(1, Writer::new().uint(1, 1).bytes(2, &nonce).uint(3, 1))
+        .finish();
+    let message = Writer::new()
+        .uint(1, 0)
+        .str(2, "sender-0")
+        .str(3, RECEIVER)
+        .str(4, NS_AUTH)
+        .uint(5, 1)
+        .bytes(7, &challenge)
+        .finish();
+    let mut frame = u32::try_from(message.len())?.to_be_bytes().to_vec();
+    frame.extend_from_slice(&message);
+    stream.write_all(&frame).await?;
+    stream.flush().await?;
+    for _ in 0..8 {
+        let frame = read_frame(stream).await?;
+        let m = parse(&frame).context("invalid Cast frame")?;
+        if m.str(4) != Some(NS_AUTH) {
+            continue;
+        }
+        let payload = m.bytes(7).context("no Cast authentication payload")?;
+        return check_answer(payload, pin, &nonce, tls_cert);
+    }
+    bail!("no answer to the Cast authentication")
+}
+
+/// The device's answer to a challenge: its identity, once its signature
+/// over `nonce` and `tls_cert` holds (against `pin`, or the identity it
+/// presents at the first contact).
+fn check_answer(
+    payload: &[u8],
+    pin: Option<&str>,
+    nonce: &[u8],
+    tls_cert: &[u8],
+) -> anyhow::Result<Identity> {
+    let answer = parse(payload).context("invalid Cast authentication answer")?;
+    if answer.bytes(3).is_some() {
+        bail!("the Cast device refused to authenticate");
+    }
+    let response = parse(answer.bytes(2).context("no Cast authentication response")?)
+        .context("invalid Cast authentication response")?;
+    // RSASSA_PKCS1v15 (1, the default), SHA-256 (1), our nonce: no replay,
+    // no downgrade.
+    if response.uint(4).unwrap_or(1) != 1
+        || response.uint(6) != Some(1)
+        || response.bytes(5) != Some(nonce)
+    {
+        bail!("Cast authentication requires SHA-256 and the current nonce");
+    }
+    let cert = response.bytes(2).context("no Cast device certificate")?;
+    let signature = response.bytes(1).context("no Cast device signature")?;
+    let fingerprint = crate::certificate_fingerprint(cert);
+    let mut signed = nonce.to_vec();
+    signed.extend_from_slice(tls_cert);
+    crate::verify_cast_signature(cert, pin.unwrap_or(&fingerprint), &signed, signature)?;
+    Ok(Identity {
+        fingerprint,
+        valid: crate::certificate_validity(cert),
+        tls_valid: crate::certificate_validity(tls_cert),
+    })
+}
+
+/// Says the sound at `url` (one the device fetches) at `level` (0–1), on a
+/// connection [`connect`] opened, the device's own volume put back
+/// afterwards, within `limit`. `started` as the device starts playing it.
+///
+/// # Errors
+/// The device refused the app or the sound, or it did not end in time.
 pub async fn say_on<S: AsyncRead + AsyncWrite + Send + 'static>(
     stream: S,
     url: &str,
@@ -368,6 +478,70 @@ async fn played<W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_authentication_answer_is_refused_when_missing_replayed_or_downgraded() {
+        assert!(check_answer(&[], None, b"nonce", b"tls").is_err());
+        let refused = Writer::new().msg(3, Writer::new().uint(1, 0)).finish();
+        assert!(check_answer(&refused, None, b"nonce", b"tls").is_err());
+        for (nonce, hash, algorithm) in [(b"old".as_slice(), 1, 1), (b"new", 0, 1), (b"new", 1, 2)]
+        {
+            let answer = Writer::new()
+                .msg(
+                    2,
+                    Writer::new()
+                        .bytes(1, b"signature")
+                        .bytes(2, b"certificate")
+                        .uint(4, algorithm)
+                        .bytes(5, nonce)
+                        .uint(6, hash),
+                )
+                .finish();
+            let error = check_answer(&answer, None, b"new", b"tls").unwrap_err();
+            assert!(error.to_string().contains("current nonce"));
+        }
+    }
+
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// supermomo31's vectors (#129): an identity, its signature over a
+    /// nonce and a TLS certificate.
+    #[test]
+    fn an_identity_vouches_for_the_tls_certificate_it_signed_only() {
+        let cert = hex(
+            "308202e8308201d0a0030201020214499e23948a2a70f7e2dc330c87cd82946bb4bd66300d06092a864886f70d01010b050030143112301006035504030c09636173742d74657374301e170d3236313130333230313730355a170d3236313130343230313730355a30143112301006035504030c09636173742d7465737430820122300d06092a864886f70d01010105000382010f003082010a0282010100985fd9c83a2feafc952f86d588266fe4f6f09735dd62205824b79da91c2cd5478c53927b0ec1ac818bf02d0ea6798e9c88b8412ea78779ff314c98e5ab226b51cdb0ac7a00626bb99cb04f3eeab5a5a053b396f06eb8c99a107f9c7a2ff790415842798c6d7a1a889a227d18824c36ec0f56b3c72ee73358fd9835afe83845ae07fe58fc9c785abfd5d9c58f079fea4526059c27d7818961767067d7b144c372a588dd6d16f718b69c0d898238a437952f9fba95a52dbe8e1b0160068ad1e304a00811f032d03930a4a28e81c43637ea213744630b494ebff508bc27f1bc33dbc1c37c9386bd979c0b793ed016fe19bcdf18d6911db5c3f36931d796fa79a4290203010001a3323030301d0603551d0e0416041418ac473870e4e21f36f03081c2d3eedfbb0efd78300f0603551d130101ff040530030101ff300d06092a864886f70d01010b050003820101005ac744724ed068091fe2025485abf42cd43a595185852423db0e9e497cac4b398194dc49389c203622130d0b41e5a4cfaab8856b5c7928439c42ac16522f7a970082574b96769def6a1f76a9e29975d895bdafcb9f689c2ac754356b4d288fb71d7436e25532673a101bca8758d918e07a7f1474410f9ce4b3dc29db8ade02e2eaffa53c16010e76f238e615e372f3e4e1845c919ceb238fdfbd6a7e8ccf4a337df6e088587733671b4f1b3c2da2ebc277216672d64ea61e65b43a9e92fb9640255d2bb0a40c9c35d0ed29b8c42887f000feb2dab2f50fac58a20f7a9174f6e90632d13c38faeb1c736171f2bd228ce4d564a722ecee1af062a5de080db7a391",
+        );
+        let signature = hex(
+            "71e52e8a32857f9ba9f5bbbfe376780296d847116f05d6b70d7a623270f6f853646f73ca7ddd84a21853776d79e74b1e1ffc7218bb5ab5ed377bfbc48197b85cbf1ce97d676eebe8ea7690f76a44b0fb659fdfbc5600921b847406037ff8aa8ad13f9d3ebf2f85ed42bd811af543d26699b4e4fe189d6bde108d852d8140193801bea7114884f97bef91b6e1c1c81aca247d1686b339a6f3afa6b1234950e127e21cc25ff3520c13dc260e886905ba76e7256362f6f6e60a54d2ad75ca40b8c748d6d454db93e2d27a5f166dcf77c26bb9d261a8772618120dcb0ba78ff987237686f670465d82d44d99f545c8802f2fc1ac1ca5dca443e7d299a24d505916b6",
+        );
+        let answer = Writer::new()
+            .msg(
+                2,
+                Writer::new()
+                    .bytes(1, &signature)
+                    .bytes(2, &cert)
+                    .uint(4, 1)
+                    .bytes(5, b"nonce:")
+                    .uint(6, 1),
+            )
+            .finish();
+        let first = check_answer(&answer, None, b"nonce:", b"tls-before").unwrap();
+        assert_eq!(first.fingerprint, crate::certificate_fingerprint(&cert));
+        assert_eq!(
+            first.valid,
+            Some(("261103201705Z".into(), "261104201705Z".into()))
+        );
+        let again = check_answer(&answer, Some(&first.fingerprint), b"nonce:", b"tls-before");
+        assert_eq!(again.unwrap().fingerprint, first.fingerprint);
+        // Another TLS certificate than the one signed; another identity.
+        assert!(check_answer(&answer, None, b"nonce:", b"tls-after").is_err());
+        assert!(check_answer(&answer, Some(&"0".repeat(64)), b"nonce:", b"tls-before").is_err());
+    }
 
     #[tokio::test]
     async fn envelopes_round_trip() {

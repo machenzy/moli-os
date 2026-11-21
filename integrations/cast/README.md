@@ -1,7 +1,10 @@
 # Google Cast (annonces)
 
-- Cast v2 (`moli-net::cast`, le cadre de `androidtv`) : TLS sur 8009, certificat épinglé au
-  premier contact, trames protobuf autour de JSON. Annonces seulement, par `moli-announce`
+- Cast v2 (`moli-net::cast`, le cadre de `androidtv`) : TLS sur 8009, trames protobuf autour
+  de JSON. Le certificat TLS de l'enceinte change tout seul (chaque jour, à chaque
+  redémarrage) : c'est son identité DeviceAuth qui est épinglée, et elle signe à chaque
+  connexion le certificat TLS du moment (le mécanisme de supermomo31, #129). Vu sur un Home
+  Mini : le certificat TLS épinglé un soir ne passait plus le lendemain matin. Annonces seulement, par `moli-announce`
   comme le Sonos et l'AirPlay : Piper en local (Wyoming), son publié par Moli, joué par le
   *Default Media Receiver* (`CC1AD845`).
 - Une annonce : volume lu, volume de l'annonce réglé, appli lancée, `LOAD` du WAV, fin

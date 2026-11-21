@@ -966,8 +966,16 @@ host = "192.168.1.x"
 - **Couvre** : une enceinte Google Cast par instance (Google Home, Nest Mini, Nest Audio), pour
   des **annonces** seulement (pas de musique, pas de groupe d'enceintes).
 - **Protocole** : Google Cast v2, dans `moli-net::cast` (le même cadre que `androidtv`) : TLS
-  sur **8009**, certificat de l'enceinte épinglé au premier contact (secret `cast_cert`), des
-  trames de 4 octets de longueur puis une enveloppe protobuf autour de JSON. Une annonce, comme
+  sur **8009**, des trames de 4 octets de longueur puis une enveloppe protobuf autour de JSON.
+  ⚠️ L'enceinte **régénère son certificat TLS** (au plus tard chaque jour, à chaque
+  redémarrage) : l'épingler casse les annonces le lendemain. Ce qui est épinglé au premier
+  contact, c'est son **identité** (secret `cast_identity`) : le certificat qu'elle présente par
+  DeviceAuth (`urn:x-cast:com.google.cast.tp.deviceauth`). À chaque connexion, Moli lui envoie
+  un nonce de 32 octets ; elle signe (RSA PKCS#1, SHA-256) ce nonce suivi du certificat TLS de
+  la connexion avec la clé de cette identité. Un autre nonce, un autre algorithme, une autre
+  identité ou un autre certificat TLS : refusé. Le mécanisme vient du travail de supermomo31
+  sur Cast (#129). Au démarrage, le journal dit l'identité et les validités des deux
+  certificats (`cast speaker authenticated`). Une annonce, comme
   `tts.speak` de Home Assistant : le volume de l'enceinte est lu (`GET_STATUS`), celui de
   l'annonce réglé (`SET_VOLUME`), le *Default Media Receiver* de Google lancé (`LAUNCH`
   `CC1AD845`), le son chargé (`LOAD`, `audio/wav`) depuis l'adresse où Moli le publie, suivi
@@ -989,8 +997,8 @@ media_base = "http://192.168.1.y:8790"
 quiet_hours = true
 ```
 
-- **Secrets** : aucun à fournir ; `cast_cert`, l'empreinte du certificat, est gardée au premier
-  contact.
+- **Secrets** : aucun à fournir ; `cast_identity`, l'empreinte du certificat d'identité, est
+  gardée au premier contact.
 - **Points** : ceux de `moli-announce`, comme pour le Sonos et l'AirPlay (`announce`,
   `announce_volume`, `quiet`, `quiet_until`, `speaking` dès que l'enceinte passe à `PLAYING`).
 - **Pièges** : ⚠️ **ce que l'enceinte jouait s'arrête** (radio, musique castée depuis un
@@ -998,7 +1006,9 @@ quiet_hours = true
   présence est testée par une simple connexion TCP, qui ne coupe rien. Une annonce qui n'est
   pas finie dans sa durée plus 30 s est abandonnée.
 - **Identité** : l'adresse `host`.
-- **Tests** : une annonce entière contre une fausse enceinte (l'ordre des messages, le volume
+- **Tests** : DeviceAuth sur des signatures réelles (l'identité qui couvre le certificat TLS
+  qu'elle a signé, pas un autre ; une autre identité, un nonce rejoué, un algorithme dégradé ou
+  une réponse refusée : refusés), une annonce entière contre une fausse enceinte (l'ordre des messages, le volume
   de l'annonce puis celui d'avant, l'adresse et le type du son, la session arrêtée), un son
   refusé ou coupé (`LOAD_FAILED`, `ERROR`, `INTERRUPTED`) qui remet quand même l'enceinte, une
   enceinte muette abandonnée à temps, la durée lue dans l'en-tête du WAV.
