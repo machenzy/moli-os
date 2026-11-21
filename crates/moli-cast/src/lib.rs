@@ -6,22 +6,25 @@
 //! The speaker fetches the sound from Moli (`media_base`), through Google's
 //! Default Media Receiver: what it was playing stops, as with Home
 //! Assistant's `tts.speak`. Its volume is set for the announcement, then
-//! put back. Its certificate is pinned at first contact (secret `cast_cert`).
+//! put back. Its TLS certificate changes by itself; what is pinned at first
+//! contact is its identity, the certificate it signs that TLS certificate
+//! with through DeviceAuth (secret `cast_identity`).
 //! Whether it is there is asked by a bare TCP connection, which cuts nothing.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use moli_announce::{Announcements, Announcer, Speaker, Speech};
 use moli_core::{Device, DeviceId};
-use moli_net::PinnedTls;
+use moli_net::cast::Identity;
 use moli_runtime::{BoxFuture, Driver, DriverCtx, MediaPublisher};
 use serde::Deserialize;
 
 /// Whether the speaker is there, asked this often (a TCP connection only).
 const REACH_EVERY: Duration = Duration::from_secs(30);
-/// Where the speaker's certificate fingerprint is kept.
-const CERT: &str = "cast_cert";
+/// Where the speaker's identity (its DeviceAuth certificate's fingerprint)
+/// is kept.
+const IDENTITY: &str = "cast_identity";
 /// Time for the app to start and the sound to be fetched, beyond its length.
 const SLACK: Duration = Duration::from_secs(30);
 
@@ -93,7 +96,9 @@ struct Loudspeaker {
     host: String,
     port: u16,
     media_base: String,
-    tls: Arc<PinnedTls>,
+    /// The identity pinned, once known (it may be learned at the first
+    /// announcement, the run loop then keeps it).
+    identity: Arc<Mutex<Option<String>>>,
     publisher: MediaPublisher,
 }
 
@@ -107,15 +112,23 @@ impl Speaker for Loudspeaker {
         Box::pin(async move {
             let limit = length(&wav) + SLACK;
             let url = moli_announce::publish_sound(&self.publisher, &self.media_base, wav)?;
-            moli_net::cast::say(
-                &self.tls,
-                &self.host,
-                self.port,
-                &url,
-                f64::from(level) / 100.0,
-                limit,
-                || started.now(),
-            )
+            let pinned = self
+                .identity
+                .lock()
+                .map_err(|_| anyhow::anyhow!("poisoned"))?
+                .clone();
+            let (stream, who) =
+                moli_net::cast::connect(&self.host, self.port, pinned.as_deref()).await?;
+            if pinned.is_none() {
+                tell(&self.host, &who);
+                *self
+                    .identity
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("poisoned"))? = Some(who.fingerprint);
+            }
+            moli_net::cast::say_on(stream, &url, f64::from(level) / 100.0, limit, || {
+                started.now();
+            })
             .await
         })
     }
@@ -140,13 +153,13 @@ fn length(wav: &[u8]) -> Duration {
 async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     let host = config.host.as_str();
     let id = ctx.device_id(host);
-    let mut stored = ctx.secret(CERT);
-    let tls = Arc::new(PinnedTls::new(stored.clone())?);
+    let mut stored = ctx.secret(IDENTITY);
+    let identity = Arc::new(Mutex::new(stored.clone()));
     let speaker = Loudspeaker {
         host: host.to_owned(),
         port: config.port,
         media_base: config.media_base.clone(),
-        tls: Arc::clone(&tls),
+        identity: Arc::clone(&identity),
         publisher: ctx.media_publisher(),
     };
     let mut announcements = Announcements::new(Some(Announcer::new(
@@ -158,14 +171,19 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
     .keeping_quiet_hours(config.quiet_hours);
     ctx.upsert_device(device(ctx, &id, host, &announcements));
     announcements.start(ctx, &id);
-    // The certificate, pinned now when the speaker is there (otherwise at
-    // the first announcement).
-    if stored.is_none() {
-        if let Err(e) = tls.connect(host, config.port).await {
-            tracing::info!(host, error = %format!("{e:#}"), "cast speaker not reached at start");
+    // Who answers, said in the log (and learned at the first contact).
+    match moli_net::cast::connect(host, config.port, stored.as_deref()).await {
+        Ok((_, who)) => {
+            tell(host, &who);
+            if let Ok(mut known) = identity.lock() {
+                known.get_or_insert(who.fingerprint);
+            }
         }
-        keep_pin(ctx, &tls, &mut stored).await;
+        Err(e) => {
+            tracing::warn!(host, error = %format!("{e:#}"), "cast speaker not authenticated at start");
+        }
     }
+    keep_identity(ctx, &identity, &mut stored).await;
     let mut online = None;
     ctx.ready();
     let mut tick = tokio::time::interval(REACH_EVERY);
@@ -189,25 +207,44 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
                     online = Some(up);
                     ctx.set_availability(&id, up);
                 }
-                if stored.is_none() {
-                    keep_pin(ctx, &tls, &mut stored).await;
-                }
+                keep_identity(ctx, &identity, &mut stored).await;
             }
         }
     }
 }
 
-/// Keeps the certificate seen first, for the next starts.
-async fn keep_pin(ctx: &DriverCtx, tls: &PinnedTls, stored: &mut Option<String>) {
-    let Some(seen) = tls.pinned_fingerprint() else {
+/// Says in the log who answered: the identity pinned and how long it and
+/// the TLS certificate of the moment are valid (whether the identity
+/// changes too, the log will tell).
+fn tell(host: &str, who: &Identity) {
+    let span = |v: &Option<(String, String)>| {
+        v.as_ref()
+            .map_or_else(|| "?".to_owned(), |(from, to)| format!("{from} → {to}"))
+    };
+    tracing::info!(
+        host,
+        identity = %who.fingerprint.get(..16).unwrap_or(&who.fingerprint),
+        identity_valid = %span(&who.valid),
+        tls_valid = %span(&who.tls_valid),
+        "cast speaker authenticated"
+    );
+}
+
+/// Keeps the identity learned, for the next starts.
+async fn keep_identity(
+    ctx: &DriverCtx,
+    identity: &Mutex<Option<String>>,
+    stored: &mut Option<String>,
+) {
+    let Some(known) = identity.lock().ok().and_then(|i| i.clone()) else {
         return;
     };
-    if !ctx.can_store_secrets() {
+    if stored.as_ref() == Some(&known) || !ctx.can_store_secrets() {
         return;
     }
-    match ctx.store_secret(CERT, &seen).await {
-        Ok(()) => *stored = Some(seen),
-        Err(e) => tracing::warn!(error = %e, "cast certificate not stored"),
+    match ctx.store_secret(IDENTITY, &known).await {
+        Ok(()) => *stored = Some(known),
+        Err(e) => tracing::warn!(error = %e, "cast identity not stored"),
     }
 }
 

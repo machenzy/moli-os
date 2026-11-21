@@ -71,6 +71,68 @@ pub(crate) fn v1_key(cert: &[u8]) -> Option<Key<'_>> {
     }
 }
 
+/// The RSA public key of a certificate, v1 or v3 (a Cast device's
+/// identity: its DeviceAuth certificate).
+pub(crate) fn rsa_key(cert: &[u8]) -> Option<&[u8]> {
+    let (_, after, _) = spki(cert)?;
+    let (tag, algorithm, after) = element(after)?;
+    if tag != 0x30 || element(algorithm)?.1 != RSA {
+        return None;
+    }
+    let (tag, bits, tail) = element(after)?;
+    if tag != 0x03 || bits.first() != Some(&0) || !tail.is_empty() {
+        return None;
+    }
+    Some(&bits[1..])
+}
+
+/// A certificate's validity, as written (`YYMMDDHHMMSSZ` or
+/// `YYYYMMDDHHMMSSZ`): not before, not after.
+pub(crate) fn validity(cert: &[u8]) -> Option<(String, String)> {
+    let mut rest = tbs(cert)?;
+    // serial, signature algorithm, issuer
+    for _ in 0..3 {
+        rest = element(rest)?.2;
+    }
+    let (tag, validity, _) = element(rest)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let (_, from, after) = element(validity)?;
+    let (_, to, _) = element(after)?;
+    Some((
+        String::from_utf8_lossy(from).into_owned(),
+        String::from_utf8_lossy(to).into_owned(),
+    ))
+}
+
+/// The to-be-signed part of a certificate, past its explicit version.
+fn tbs(cert: &[u8]) -> Option<&[u8]> {
+    let (tag, cert, tail) = element(cert)?;
+    if tag != 0x30 || !tail.is_empty() {
+        return None;
+    }
+    let (tag, mut tbs, _) = element(cert)?;
+    if tag != 0x30 {
+        return None;
+    }
+    if tbs.first() == Some(&0xA0) {
+        tbs = element(tbs)?.2;
+    }
+    Some(tbs)
+}
+
+/// The subject public key info: (tag, content, rest).
+fn spki(cert: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let mut rest = tbs(cert)?;
+    // serial, signature algorithm, issuer, validity, subject
+    for _ in 0..5 {
+        rest = element(rest)?.2;
+    }
+    let (tag, spki, rest) = element(rest)?;
+    (tag == 0x30).then_some((tag, spki, rest))
+}
+
 fn algorithm(scheme: SignatureScheme, key: &Key<'_>) -> Option<&'static dyn VerificationAlgorithm> {
     Some(match (scheme, key) {
         (SignatureScheme::RSA_PKCS1_SHA256, Key::Rsa(_)) => &signature::RSA_PKCS1_2048_8192_SHA256,
@@ -154,6 +216,23 @@ mod tests {
             ),
             Some(false)
         );
+    }
+
+    #[test]
+    fn rsa_keys_read_the_same_as_v1_and_refuse_truncated_certificates() {
+        let cert = station_cert();
+        assert_eq!(
+            rsa_key(&cert),
+            match v1_key(&cert) {
+                Some(Key::Rsa(key)) => Some(key),
+                _ => None,
+            }
+        );
+        assert!(validity(&cert).is_some());
+        for end in 0..cert.len() {
+            assert_eq!(rsa_key(&cert[..end]), None);
+        }
+        assert_eq!(rsa_key(b"not der"), None);
     }
 
     #[test]
