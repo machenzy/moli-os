@@ -91,6 +91,13 @@ pub fn floor(ms: u64, step: Step, tz: &TimeZone) -> Result<u64, EnergyError> {
     }
 }
 
+/// The local `hour` o'clock of the day starting at `day` (a local midnight):
+/// the civil hour, so 6:00 stays 6:00 on the days DST changes.
+pub fn at_hour(day: u64, hour: i8, tz: &TimeZone) -> Result<u64, EnergyError> {
+    let z = zoned(day, tz)?;
+    Ok(millis(&z.with().hour(hour).build().map_err(|e| bad(&e))?))
+}
+
 /// Start of the next bucket (days of 23 or 25 hours across DST). Floored
 /// again: where DST skips midnight, a day starts at 01:00 and the next one
 /// still starts at its own midnight.

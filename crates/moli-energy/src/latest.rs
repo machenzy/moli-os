@@ -32,6 +32,17 @@ impl Energy {
         }
     }
 
+    /// The local hour this energy's day starts at: a gas day runs from 6:00
+    /// to 6:00 (the European gas day, the one GRDF reports and bills), so
+    /// « the 20th » is what GRDF says of the 20th, not a calendar day made
+    /// of two gas days.
+    fn day_starts_at(self) -> i8 {
+        match self {
+            Self::Electricity => 0,
+            Self::Gas => 6,
+        }
+    }
+
     fn of(self, period: &Period) -> Option<Amount> {
         match self {
             Self::Electricity => Some(period.total.clone()),
@@ -44,7 +55,8 @@ impl Energy {
 #[derive(Clone, Debug, Serialize)]
 pub struct LastDay {
     pub energy: Energy,
-    /// Start of that day (local midnight), ms.
+    /// That day, as its local midnight (ms): its date. A gas day runs from
+    /// 6:00 that day to 6:00 the next.
     pub day: u64,
     pub amount: Amount,
     /// The days with readings before it (seven at most), on average.
@@ -79,23 +91,30 @@ pub(crate) fn last_days(
         let Some(ids) = late_meters(config, energy) else {
             continue;
         };
-        // Only whole days: a gas day runs from 6:00 to 6:00 (GRDF), so the
-        // last calendar day holds a few of its hours, not the day.
+        // Only whole days: the last one told may be known in part.
+        let start = energy.day_starts_at();
         let mut hours: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
         for row in rows.iter().filter(|r| ids.contains(&r.meter.as_str())) {
-            let day = report::floor(row.hour, Step::Day, tz)?;
+            let day = day_holding(row.hour, start, tz)?;
             hours.entry(day).or_default().insert(row.hour);
         }
+        let bounds = |day: u64| -> Result<(u64, u64), EnergyError> {
+            let next = report::next(day, Step::Day, tz)?;
+            Ok((
+                report::at_hour(day, start, tz)?,
+                report::at_hour(next, start, tz)?,
+            ))
+        };
         let mut days = BTreeSet::new();
         for (day, told) in hours {
-            let length = report::next(day, Step::Day, tz)? - day;
-            if told.len() as u64 * HOUR_MS >= length {
+            let (from, to) = bounds(day)?;
+            if told.len() as u64 * HOUR_MS >= to - from {
                 days.insert(day);
             }
         }
         let Some(&day) = days.last() else { continue };
-        let amount_of = |from: u64| -> Result<Option<Amount>, EnergyError> {
-            let to = report::next(from, Step::Day, tz)?;
+        let amount_of = |day: u64| -> Result<Option<Amount>, EnergyError> {
+            let (from, to) = bounds(day)?;
             Ok(energy.of(&Period::of(config, rows, from, to)))
         };
         let Some(amount) = amount_of(day)? else {
@@ -116,6 +135,16 @@ pub(crate) fn last_days(
         });
     }
     Ok(out)
+}
+
+/// The day an hour belongs to (its local midnight), for days that start at
+/// `start` o'clock: at 6:00, the hours before 6:00 belong to the day before.
+fn day_holding(hour: u64, start: i8, tz: &TimeZone) -> Result<u64, EnergyError> {
+    let day = report::floor(hour, Step::Day, tz)?;
+    if hour >= report::at_hour(day, start, tz)? {
+        return Ok(day);
+    }
+    report::floor(day.saturating_sub(1), Step::Day, tz)
 }
 
 #[allow(clippy::cast_precision_loss)] // a handful of days
@@ -181,10 +210,19 @@ mod tests {
     }
 
     fn day_of(meter: &str, day: u64, kwh_per_hour: f64, cost: Option<f64>) -> Vec<HourRow> {
+        hours_from(meter, NOV + day * DAY, kwh_per_hour, cost)
+    }
+
+    /// A gas day as GRDF tells it: 24 hours from 6:00.
+    fn gas_day(day: u64, kwh_per_hour: f64) -> Vec<HourRow> {
+        hours_from("gaz", NOV + day * DAY + 6 * HOUR_MS, kwh_per_hour, None)
+    }
+
+    fn hours_from(meter: &str, from: u64, kwh_per_hour: f64, cost: Option<f64>) -> Vec<HourRow> {
         (0..24)
             .map(|h| HourRow {
                 meter: meter.into(),
-                hour: NOV + day * DAY + h * HOUR_MS,
+                hour: from + h * HOUR_MS,
                 kwh: kwh_per_hour,
                 cost,
             })
@@ -199,7 +237,7 @@ mod tests {
             rows.extend(day_of("linky", d, 0.5, Some(0.1)));
         }
         for d in 0..9 {
-            rows.extend(day_of("gaz", d, 2.0, None));
+            rows.extend(gas_day(d, 2.0));
         }
         let days = last_days(&config(""), &rows, &paris()).unwrap();
         let elec = days
@@ -220,13 +258,59 @@ mod tests {
 
     #[test]
     fn a_day_known_only_in_part_is_not_the_last_day() {
-        // A gas day from 6:00 to 6:00: the next calendar day holds 6 of its hours.
-        let mut rows = day_of("gaz", 0, 2.0, None);
-        rows.extend(day_of("gaz", 1, 2.0, None).into_iter().take(6));
+        // The gas day of the 1st, then 6 hours of the 2nd's.
+        let mut rows = gas_day(0, 2.0);
+        rows.extend(gas_day(1, 2.0).into_iter().take(6));
         let days = last_days(&config(""), &rows, &paris()).unwrap();
         let gas = days.iter().find(|d| d.energy == Energy::Gas).unwrap();
         assert_eq!(gas.day, NOV);
         assert!((gas.amount.kwh - 48.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_gas_day_is_grdfs_from_six_to_six() {
+        // As on 19 and 20 November 2026: 42 kWh, then 29.7 kWh. Summed from
+        // midnight to midnight, « the 20th » would hold 6 hours of the 19th's
+        // gas day (≈ 33 kWh); GRDF says 29.7.
+        let mut rows = gas_day(18, 42.0 / 24.0);
+        rows.extend(gas_day(19, 29.7 / 24.0));
+        let days = last_days(&config(""), &rows, &paris()).unwrap();
+        let gas = days.iter().find(|d| d.energy == Energy::Gas).unwrap();
+        assert_eq!(gas.day, NOV + 19 * DAY, "dated the 20th");
+        assert!((gas.amount.kwh - 29.7).abs() < 1e-6, "{}", gas.amount.kwh);
+        assert_eq!(gas.usual_days, 1);
+        assert!((gas.usual.as_ref().unwrap().kwh - 42.0).abs() < 1e-6);
+        // Electricity keeps its calendar days.
+        assert!(days.iter().all(|d| d.energy == Energy::Gas));
+    }
+
+    #[test]
+    fn a_gas_day_across_a_clock_change_still_runs_from_six_to_six() {
+        let tz = paris();
+        // Clocks go back at 3:00 on 25 October 2026: the gas day of Saturday
+        // the 24th, from its 6:00 to Sunday's 6:00, lasts 25 hours.
+        let sunday = 1_792_879_200_000; // 2026-10-25 00:00 Paris
+        let saturday = report::floor(sunday - 1, Step::Day, &tz).unwrap();
+        let six = report::at_hour(saturday, 6, &tz).unwrap();
+        assert_eq!(report::at_hour(sunday, 6, &tz).unwrap() - six, 25 * HOUR_MS);
+        // An hour before 6:00 belongs to the day before.
+        assert_eq!(
+            super::day_holding(six - HOUR_MS, 6, &tz).unwrap(),
+            report::floor(saturday - 1, Step::Day, &tz).unwrap()
+        );
+        assert_eq!(super::day_holding(six, 6, &tz).unwrap(), saturday);
+        let rows: Vec<HourRow> = (0..25)
+            .map(|h| HourRow {
+                meter: "gaz".into(),
+                hour: six + h * HOUR_MS,
+                kwh: 1.0,
+                cost: None,
+            })
+            .collect();
+        let days = last_days(&config(""), &rows, &tz).unwrap();
+        let gas = days.iter().find(|d| d.energy == Energy::Gas).unwrap();
+        assert_eq!(gas.day, saturday);
+        assert!((gas.amount.kwh - 25.0).abs() < 1e-9);
     }
 
     #[test]
