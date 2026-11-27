@@ -2,7 +2,7 @@
   import { kwh, euros } from '../lib/energy-live.svelte.js';
   import { deviceSeries } from '../lib/energy-series.js';
   import { ownUse } from '../lib/energy-own.js';
-  import { gaps } from '../lib/energy-late.js';
+  import { gaps, partialGasDay } from '../lib/energy-late.js';
   import { t, locale } from '../../lib/i18n.svelte.js';
 
   /** Bars over 24 h / 30 days / 12 months, stacked by what drew it
@@ -141,6 +141,9 @@
   const holes = $derived(gaps(report, { gas: stackGas }));
   const HOLE = 0.12;
   const shortDay = (ms) => new Date(ms).toLocaleDateString(locale(), { day: 'numeric', month: 'short', timeZone: tz });
+  // The last gas day GRDF has told stops at 6 am: that day's gas is only its
+  // first hours, greyed so the short bar does not read as a quiet day.
+  const partial = $derived(stackGas ? partialGasDay(report) : -1);
   const runText = (r) => (r.days === 1 ? shortDay(r.from) : t('energie.chart.du_au', { from: shortDay(r.from), to: shortDay(r.to), n: r.days }));
 </script>
 
@@ -176,7 +179,11 @@
         {/if}
         {#each bar.parts.reduce((acc, p) => [...acc, { p, base: acc.at(-1)?.top ?? 0, top: (acc.at(-1)?.top ?? 0) + p.a.kwh }], []) as seg, k (seg.p.s.id)}
           {#if seg.p.a.kwh > 0}
-            <rect {x} width={w} y={y(seg.top)} height={Math.max(0, y(seg.base) - y(seg.top) - (k ? 1.5 : 0))} rx={Math.min(5, w / 3)} fill={seg.p.s.color} />
+            {#if i === partial && seg.p.s.gas}
+              <rect {x} width={w} y={y(seg.top)} height={Math.max(0, y(seg.base) - y(seg.top) - (k ? 1.5 : 0))} rx={Math.min(5, w / 3)} class="partial"><title>{t('energie.chart.gaz_partiel')}</title></rect>
+            {:else}
+              <rect {x} width={w} y={y(seg.top)} height={Math.max(0, y(seg.base) - y(seg.top) - (k ? 1.5 : 0))} rx={Math.min(5, w / 3)} fill={seg.p.s.color} />
+            {/if}
           {/if}
         {/each}
       </g>
@@ -256,6 +263,10 @@
 
   .hit {
     fill: transparent;
+  }
+
+  .partial {
+    fill: var(--surface-3);
   }
 
   .halo {

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { noLiveMeasure, lateHouse, lastDay, vsUsual, usualFrac, gaps } from './energy-late.js';
+import { noLiveMeasure, lateHouse, lastDay, vsUsual, usualFrac, gaps, partialGasDay } from './energy-late.js';
 
 const DAY = 86_400_000;
 
@@ -89,4 +89,21 @@ test('the gas holes only when the chart draws the gas', () => {
   const drawn = gaps(report, { gas: false });
   assert.deepEqual(drawn.meters, []);
   assert.equal(drawn.missing.size, 0);
+});
+
+test('the last day the gas reaches is a gas day known in part', () => {
+  const day = (i, ids) => ({ start: i * DAY, meters: Object.fromEntries(ids.map((id) => [id, { kwh: 1 }])) });
+  const report = {
+    step: 'day',
+    meters: [
+      { id: 'linky', name: 'Linky', role: 'grid', history: true },
+      { id: 'gaz', name: 'Gaz', role: 'gas', history: true },
+    ],
+    // The gas day of day 2 runs until 6 am on day 3; nothing after.
+    buckets: [day(0, ['linky', 'gaz']), day(1, ['linky', 'gaz']), day(2, ['linky', 'gaz']), day(3, ['linky', 'gaz']), day(4, ['linky']), day(5, [])],
+  };
+  assert.equal(partialGasDay(report), 3);
+  assert.equal(partialGasDay({ ...report, step: 'hour' }), -1);
+  assert.equal(partialGasDay({ ...report, meters: report.meters.slice(0, 1) }), -1);
+  assert.equal(partialGasDay({ ...report, buckets: [day(0, ['linky'])] }), -1);
 });

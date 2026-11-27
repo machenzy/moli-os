@@ -73,3 +73,21 @@ export function gaps(report, { gas = true } = {}) {
   }
   return out;
 }
+
+/**
+ * The bar of a report by day whose gas is known only in part, or -1. A late
+ * gas meter (Gazpar through GRDF) tells whole gas days, from 6 am to 6 am:
+ * the last calendar day it reaches holds only the first 6 hours of the next
+ * gas day, the rest is not published yet.
+ * @param {object} report
+ * @returns {number}
+ */
+export function partialGasDay(report) {
+  if (report?.step !== 'day') return -1;
+  const ids = (report.meters ?? []).filter((m) => m.history && m.role === 'gas').map((m) => m.id);
+  const buckets = report.buckets ?? [];
+  for (let i = buckets.length - 1; i >= 0; i--) {
+    if (ids.some((id) => buckets[i].meters?.[id] != null)) return i;
+  }
+  return -1;
+}
