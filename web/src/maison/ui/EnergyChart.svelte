@@ -142,8 +142,10 @@
   const HOLE = 0.12;
   const shortDay = (ms) => new Date(ms).toLocaleDateString(locale(), { day: 'numeric', month: 'short', timeZone: tz });
   // The last gas day GRDF has told stops at 6 am: that day's gas is only its
-  // first hours, greyed so the short bar does not read as a quiet day.
+  // first hours, hatched in grey so the short bar does not read as a quiet day.
   const partial = $derived(stackGas ? partialGasDay(report) : -1);
+  // Its own id: two charts on a page would otherwise share one pattern.
+  const hatch = `gaz-partiel-${Math.random().toString(36).slice(2, 8)}`;
   const runText = (r) => (r.days === 1 ? shortDay(r.from) : t('energie.chart.du_au', { from: shortDay(r.from), to: shortDay(r.to), n: r.days }));
 </script>
 
@@ -166,6 +168,14 @@
 
   <div class="plot" bind:clientWidth={W}>
   <svg viewBox="0 0 {W} {H}" height={H} role="img" aria-label={t('energie.chart.conso')} onpointerleave={() => (hover = null)}>
+    {#if partial >= 0}
+      <defs>
+        <pattern id={hatch} width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <rect width="6" height="6" class="hatch-ground" />
+          <line x1="0" y1="0" x2="0" y2="6" class="hatch-line" />
+        </pattern>
+      </defs>
+    {/if}
     {#each [0.5, 1] as f (f)}
       <line x1="0" x2={W} y1={y(max * f)} y2={y(max * f)} class="rule" />
     {/each}
@@ -180,7 +190,7 @@
         {#each bar.parts.reduce((acc, p) => [...acc, { p, base: acc.at(-1)?.top ?? 0, top: (acc.at(-1)?.top ?? 0) + p.a.kwh }], []) as seg, k (seg.p.s.id)}
           {#if seg.p.a.kwh > 0}
             {#if i === partial && seg.p.s.gas}
-              <rect {x} width={w} y={y(seg.top)} height={Math.max(0, y(seg.base) - y(seg.top) - (k ? 1.5 : 0))} rx={Math.min(5, w / 3)} class="partial"><title>{t('energie.chart.gaz_partiel')}</title></rect>
+              <rect {x} width={w} y={y(seg.top)} height={Math.max(0, y(seg.base) - y(seg.top) - (k ? 1.5 : 0))} rx={Math.min(5, w / 3)} class="partial" fill="url(#{hatch})"><title>{t('energie.chart.gaz_partiel')}</title></rect>
             {:else}
               <rect {x} width={w} y={y(seg.top)} height={Math.max(0, y(seg.base) - y(seg.top) - (k ? 1.5 : 0))} rx={Math.min(5, w / 3)} fill={seg.p.s.color} />
             {/if}
@@ -266,7 +276,20 @@
   }
 
   .partial {
-    fill: var(--surface-3);
+    stroke: var(--ink-3);
+    stroke-width: 1;
+    stroke-opacity: 0.8;
+  }
+
+  .hatch-ground {
+    fill: var(--ink-3);
+    fill-opacity: 0.35;
+  }
+
+  .hatch-line {
+    stroke: var(--ink-3);
+    stroke-width: 2.5;
+    stroke-opacity: 0.95;
   }
 
   .halo {

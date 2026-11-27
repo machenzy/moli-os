@@ -436,7 +436,7 @@
   "energie.dernier.habituel_aide": "Compared with the average of the {n} previous days with a reading ({kwh} kWh)",
   "energie.dernier.jusqu_au": "Readings up to {day}",
   "energie.gaz.detail_mois": "{kwh} kWh this month",
-  "energie.histo.note_gaz": "Gas is stacked above the electricity; each day of gas is spread evenly over its hours, and the last day, still incomplete, is greyed.",
+  "energie.histo.note_gaz": "Gas is stacked above the electricity; each day of gas is spread evenly over its hours, and the last day, still incomplete, is hatched in grey.",
   "energie.chart.sans_releve": "No reading that day",
   "energie.chart.gaz_partiel": "Gas from midnight to 6 am only: GRDF has not published the rest yet",
   "energie.chart.trous": "No reading for {name}: {days}",

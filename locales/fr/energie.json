@@ -436,7 +436,7 @@
   "energie.dernier.habituel_aide": "Comparé à la moyenne des {n} jours précédents qui ont un relevé ({kwh} kWh)",
   "energie.dernier.jusqu_au": "Relevés jusqu'au {day}",
   "energie.gaz.detail_mois": "{kwh} kWh ce mois",
-  "energie.histo.note_gaz": "Le gaz s'empile au-dessus de l'électricité ; chaque journée de gaz est répartie également sur ses heures, et le dernier jour, encore incomplet, est grisé.",
+  "energie.histo.note_gaz": "Le gaz s'empile au-dessus de l'électricité ; chaque journée de gaz est répartie également sur ses heures, et le dernier jour, encore incomplet, est hachuré en gris.",
   "energie.chart.sans_releve": "Pas de relevé ce jour-là",
   "energie.chart.gaz_partiel": "Gaz de minuit à 6 h seulement : GRDF n'a pas encore publié la suite",
   "energie.chart.trous": "Sans relevé pour {name} : {days}",
