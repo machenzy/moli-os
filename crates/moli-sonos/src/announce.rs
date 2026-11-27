@@ -44,6 +44,10 @@ pub struct Config {
     /// Says nothing during the house's quiet hours (`[guard.quiet_hours]`).
     #[serde(default)]
     pub quiet_hours: bool,
+    /// Says nothing while this point of the house is true
+    /// (`<instance>:<device>/<key>`, a « do not disturb » helper…).
+    #[serde(default, deserialize_with = "moli_announce::quiet_when")]
+    pub quiet_when: Option<moli_core::PointId>,
 }
 
 fn default_volume() -> u8 {

@@ -9,6 +9,9 @@
    `announce_volume` ensuite).
 4. Proposer `quiet_hours = true` si la maison a des `[guard.quiet_hours]` : rien n'est dit
    pendant ces heures, même par un automatisme.
+   Pour un silence qui dépend d'autre chose que l'heure (plus long le week-end, les jours
+   fériés…), `quiet_when = "<instance>:<appareil>/<clé>"` : rien n'est dit tant que ce point
+   vaut `true` (une aide « Ne pas déranger » tenue par un automatisme).
 5. Déclarer `kind = "cast"`, `host`, `media_base`. `moli-os check-config`, redémarrer.
 6. Prévenir : ce que l'enceinte jouait s'arrête pendant une annonce.
 7. Tester, humain dans la pièce : une phrase courte (`announce`), puis vérifier que le volume

@@ -51,6 +51,10 @@ pub struct Config {
     /// Says nothing during the house's quiet hours (`[guard.quiet_hours]`).
     #[serde(default)]
     pub quiet_hours: bool,
+    /// Says nothing while this point of the house is true
+    /// (`<instance>:<device>/<key>`, a « do not disturb » helper…).
+    #[serde(default, deserialize_with = "moli_announce::quiet_when")]
+    pub quiet_when: Option<moli_core::PointId>,
 }
 
 fn default_port() -> u16 {
@@ -254,7 +258,8 @@ async fn run(config: &Config, mdns_port: u16, ctx: &mut DriverCtx) -> anyhow::Re
         config.volume,
         ctx.media_publisher(),
     )))
-    .keeping_quiet_hours(config.quiet_hours);
+    .keeping_quiet_hours(config.quiet_hours)
+    .quiet_when(config.quiet_when.clone());
     ctx.upsert_device(device(ctx, &id, host, &announcements));
     announcements.start(ctx, &id);
     // What the receiver says of itself: one that will not take plain
@@ -561,6 +566,7 @@ mod tests {
             voice: None,
             volume: 40,
             quiet_hours: false,
+            quiet_when: None,
         };
         let mut driver = Airplay::new(config);
         driver.mdns_port = fake.mdns;

@@ -317,7 +317,8 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
         )),
         None => None,
     })
-    .keeping_quiet_hours(config.announce.as_ref().is_some_and(|a| a.quiet_hours));
+    .keeping_quiet_hours(config.announce.as_ref().is_some_and(|a| a.quiet_hours))
+    .quiet_when(config.announce.as_ref().and_then(|a| a.quiet_when.clone()));
     ctx.upsert_device(device(ctx, &id, &room, &model, &announcements));
     announcements.start(ctx, &id);
     ctx.ready();

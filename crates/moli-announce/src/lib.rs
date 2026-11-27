@@ -3,8 +3,9 @@
 //! speech made by a local Piper server (Wyoming), the level an announcement
 //! is said at (`announce_volume`), `quiet`, a silence that ends by itself
 //! after [`QUIET_FOR`], the house's quiet hours when the speaker keeps them
-//! ([`Announcements::keeping_quiet_hours`]), and `speaking`, the words
-//! being said.
+//! ([`Announcements::keeping_quiet_hours`]), a point of the house that
+//! silences it while true ([`Announcements::quiet_when`]), and `speaking`,
+//! the words being said.
 //!
 //! How the sound reaches the speaker is the driver's own: [`Speaker::play`].
 //! A driver keeps one [`Announcements`], adds its [`points`](Announcements::points)
@@ -16,7 +17,7 @@ use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, ensure};
-use moli_core::{Access, DeviceId, Kind, PointSpec, Semantic, Unit, Value};
+use moli_core::{Access, DeviceId, Kind, PointId, PointSpec, Semantic, Unit, Value};
 use moli_runtime::media::Image;
 use moli_runtime::{BoxFuture, CommandRequest, DriverCtx, MediaPublisher};
 use tokio::sync::watch;
@@ -230,6 +231,39 @@ impl Announcer {
     }
 }
 
+/// The point a speaker's `quiet_when` option names: `<instance>:<device>/<key>`.
+///
+/// # Errors
+/// Anything that is not a point of a device.
+pub fn quiet_point(given: Option<&str>) -> anyhow::Result<Option<PointId>> {
+    let Some(given) = given else {
+        return Ok(None);
+    };
+    let point = PointId::from(given.trim().to_owned());
+    ensure!(
+        point.split().is_some_and(|(device, _)| device
+            .as_str()
+            .split_once(':')
+            .is_some_and(|(i, n)| !i.is_empty() && !n.is_empty())),
+        "quiet_when {given:?}: a point of the house, <instance>:<device>/<key>"
+    );
+    Ok(Some(point))
+}
+
+/// Reads a speaker's `quiet_when` option (`#[serde(default, deserialize_with
+/// = "moli_announce::quiet_when")]`): a point that is not one is refused
+/// with the options, before the driver starts.
+///
+/// # Errors
+/// Anything that is not a point of a device.
+pub fn quiet_when<'de, D>(deserializer: D) -> Result<Option<PointId>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let given = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
+    quiet_point(given.as_deref()).map_err(serde::de::Error::custom)
+}
+
 /// A driver's announcements: its [`Announcer`] when they are configured,
 /// and the silence.
 #[derive(Debug, Default)]
@@ -241,6 +275,8 @@ pub struct Announcements {
     speaking: Option<watch::Receiver<Option<String>>>,
     /// Nothing is said during the house's quiet hours (`[guard.quiet_hours]`).
     quiet_hours: bool,
+    /// Nothing is said while this point of the house is true.
+    quiet_when: Option<PointId>,
 }
 
 impl Announcements {
@@ -252,6 +288,7 @@ impl Announcements {
             quiet_until: None,
             speaking,
             quiet_hours: false,
+            quiet_when: None,
         }
     }
 
@@ -262,6 +299,16 @@ impl Announcements {
     #[must_use]
     pub fn keeping_quiet_hours(mut self, keep: bool) -> Self {
         self.quiet_hours = keep;
+        self
+    }
+
+    /// Says nothing while `point`, a point of the house, is true (an
+    /// automation's « do not disturb », a helper switched by hand…), whoever
+    /// asks. As with `quiet`, an announcement then is dropped, not kept. A
+    /// point that is false, unknown or not there yet does not silence.
+    #[must_use]
+    pub fn quiet_when(mut self, point: Option<PointId>) -> Self {
+        self.quiet_when = point;
         self
     }
 
@@ -378,6 +425,13 @@ impl Announcements {
                     self.quiet_hours.then(|| ctx.quiet_hours_now(id)).flatten()
                 {
                     tracing::info!(%window, "announcement not said: quiet hours");
+                    Ok(())
+                } else if let Some(point) = self
+                    .quiet_when
+                    .as_ref()
+                    .filter(|p| ctx.read(p).is_some_and(|s| s.value == Value::Bool(true)))
+                {
+                    tracing::info!(%point, "announcement not said: silenced by a point");
                     Ok(())
                 } else {
                     speak(self.announcer.as_ref(), &command.value)
@@ -764,6 +818,7 @@ mod tests {
     #[derive(Debug)]
     struct Night {
         keep: bool,
+        quiet_when: Option<moli_core::PointId>,
         tts: String,
         made: Arc<std::sync::Mutex<Option<Arc<Announcer>>>>,
     }
@@ -782,8 +837,9 @@ mod tests {
                 };
                 let announcer = Announcer::new(Mute, speech, 35, ctx.media_publisher());
                 *self.made.lock().unwrap() = Some(Arc::clone(&announcer));
-                let mut announcements =
-                    Announcements::new(Some(announcer)).keeping_quiet_hours(self.keep);
+                let mut announcements = Announcements::new(Some(announcer))
+                    .keeping_quiet_hours(self.keep)
+                    .quiet_when(self.quiet_when.clone());
                 ctx.upsert_device(moli_core::Device {
                     id: id.clone(),
                     instance: ctx.instance().clone(),
@@ -851,6 +907,7 @@ mod tests {
                 InstanceId::from(instance),
                 Arc::new(Night {
                     keep,
+                    quiet_when: None,
                     tts: tts.clone(),
                     made: Arc::clone(&made),
                 }),
@@ -875,6 +932,139 @@ mod tests {
             );
             cancel.cancel();
             task.await.unwrap();
+        }
+    }
+
+    /// A switch of the house, as a helper is: `flag:switch/on`.
+    #[derive(Debug)]
+    struct Flag;
+
+    impl moli_runtime::Driver for Flag {
+        fn kind(&self) -> &'static str {
+            "flag"
+        }
+
+        fn run<'a>(&'a self, ctx: &'a mut DriverCtx) -> BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                let id = ctx.device_id("switch");
+                ctx.upsert_device(moli_core::Device {
+                    id: id.clone(),
+                    instance: ctx.instance().clone(),
+                    native_name: "Ne pas déranger".into(),
+                    manufacturer: None,
+                    model: None,
+                    description: None,
+                    native_room: None,
+                    members: Vec::new(),
+                    points: vec![PointSpec {
+                        key: "on".into(),
+                        label: "On".into(),
+                        semantic: Semantic::OnOff,
+                        kind: Kind::Binary,
+                        access: Access {
+                            read: true,
+                            write: true,
+                        },
+                        unit: None,
+                    }],
+                });
+                ctx.set_state(&id, "on", Value::Bool(true));
+                ctx.ready();
+                while let Some(command) = ctx.next_command().await {
+                    ctx.set_state(&id, "on", command.value.clone());
+                    command.reply(Ok(()));
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// While the point it is told to watch is true, the speaker drops an
+    /// announcement, an automation's too; once false, it says it again.
+    #[tokio::test]
+    async fn a_speaker_keeps_quiet_while_its_point_is_true() {
+        use moli_core::{InstanceId, Origin, PointId};
+        use moli_runtime::{Hub, HubOptions, spawn_driver};
+        use tokio_util::sync::CancellationToken;
+
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tts = silent.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((tcp, _)) = silent.accept().await {
+                held.push(tcp);
+            }
+        });
+        let hub = Hub::new(HubOptions::default()).unwrap();
+        let cancel = CancellationToken::new();
+        let flag = spawn_driver(
+            &hub,
+            InstanceId::from("flag"),
+            Arc::new(Flag),
+            cancel.clone(),
+        );
+        let disturb = PointId::from("flag:switch/on".to_owned());
+        settled(&hub, &disturb, &Value::Bool(true)).await;
+        let made = Arc::default();
+        let night = spawn_driver(
+            &hub,
+            InstanceId::from("night"),
+            Arc::new(Night {
+                keep: false,
+                quiet_when: quiet_point(Some("flag:switch/on")).unwrap(),
+                tts,
+                made: Arc::clone(&made),
+            }),
+            cancel.clone(),
+        );
+        settled(
+            &hub,
+            &PointId::from("night:speaker/quiet".to_owned()),
+            &Value::Bool(false),
+        )
+        .await;
+        let announce = PointId::from("night:speaker/announce".to_owned());
+        let say = || {
+            hub.command(
+                &announce,
+                Value::Text("Le linge est prêt.".into()),
+                Origin::Automation,
+                None,
+            )
+        };
+        say().await.unwrap();
+        let announcer = made.lock().unwrap().clone().unwrap();
+        assert_eq!(announcer.waiting.load(Ordering::SeqCst), 0, "silenced");
+        hub.command(&disturb, Value::Bool(false), Origin::Automation, None)
+            .await
+            .unwrap();
+        settled(&hub, &disturb, &Value::Bool(false)).await;
+        say().await.unwrap();
+        assert_eq!(announcer.waiting.load(Ordering::SeqCst), 1, "said again");
+        cancel.cancel();
+        night.await.unwrap();
+        flag.await.unwrap();
+    }
+
+    #[test]
+    fn the_silencing_point_is_a_point() {
+        assert_eq!(quiet_point(None).unwrap(), None);
+        assert_eq!(
+            quiet_point(Some(" maison:ne_pas_deranger/on ")).unwrap(),
+            Some(moli_core::PointId::from(
+                "maison:ne_pas_deranger/on".to_owned()
+            ))
+        );
+        for wrong in [
+            "",
+            "maison",
+            "maison:ne_pas_deranger",
+            "ne_pas_deranger/on",
+            ":x/on",
+            "maison:/on",
+            "maison:x/",
+        ] {
+            assert!(quiet_point(Some(wrong)).is_err(), "{wrong:?}");
         }
     }
 }

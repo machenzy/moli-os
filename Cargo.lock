@@ -1639,6 +1639,7 @@ dependencies = [
  "moli-i18n",
  "moli-net",
  "moli-runtime",
+ "serde",
  "tokio",
  "tokio-util",
  "tracing",

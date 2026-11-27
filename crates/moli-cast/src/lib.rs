@@ -49,6 +49,10 @@ pub struct Config {
     /// Says nothing during the house's quiet hours (`[guard.quiet_hours]`).
     #[serde(default)]
     pub quiet_hours: bool,
+    /// Says nothing while this point of the house is true
+    /// (`<instance>:<device>/<key>`, a « do not disturb » helper…).
+    #[serde(default, deserialize_with = "moli_announce::quiet_when")]
+    pub quiet_when: Option<moli_core::PointId>,
 }
 
 fn default_port() -> u16 {
@@ -168,7 +172,8 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
         config.volume,
         ctx.media_publisher(),
     )))
-    .keeping_quiet_hours(config.quiet_hours);
+    .keeping_quiet_hours(config.quiet_hours)
+    .quiet_when(config.quiet_when.clone());
     ctx.upsert_device(device(ctx, &id, host, &announcements));
     announcements.start(ctx, &id);
     // Who answers, said in the log (and learned at the first contact).
@@ -293,6 +298,17 @@ mod tests {
             (8009, "127.0.0.1:10200", 50, false)
         );
         assert!(serde_json::from_value::<Config>(serde_json::json!({ "host": "h" })).is_err());
+        assert_eq!(config.quiet_when, None);
+        let quiet: Config = serde_json::from_value(serde_json::json!({
+            "host": "h", "media_base": "http://m", "quiet_when": "maison:ne_pas_deranger/on" }))
+        .unwrap();
+        assert_eq!(
+            quiet.quiet_when.map(|p| p.to_string()).as_deref(),
+            Some("maison:ne_pas_deranger/on")
+        );
+        let wrong = serde_json::from_value::<Config>(serde_json::json!({
+            "host": "h", "media_base": "http://m", "quiet_when": "ne_pas_deranger" }));
+        assert!(wrong.unwrap_err().to_string().contains("quiet_when"));
     }
 
     #[test]

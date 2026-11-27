@@ -886,7 +886,7 @@ host = "192.168.1.x"
 - **Points** : `playing` (lecture/pause), `volume` (0-100 %), `mute` **écrivables** ; `state`, `title`, `artist` en lecture (métadonnées DIDL échappées).
 - **Identité** : UDN UPnP. Nom et pièce natifs = `roomName` Sonos.
 - **Annonces vocales** (`[driver.options.announce]` : `media_base`, `tts`, `voice`, `volume`,
-  `quiet_hours`) :
+  `quiet_hours`, `quiet_when`) :
   un point `announce` (texte, écriture seule), et `announce_volume` (0-100 %, **écrivable**) :
   le niveau auquel une annonce est dite. Il part du `volume` de la configuration, puis garde la
   dernière valeur écrite, redémarrage compris ; l'écrire passe par la garde comme le reste. Le
@@ -907,9 +907,14 @@ host = "192.168.1.x"
   de la pièce de l'enceinte quand elles en visent), rien n'est dit, quelle que soit l'origine :
   un automatisme aussi, que la garde laisse pourtant passer. Comme avec `quiet`, l'annonce est
   écartée (journalisée), pas gardée pour le matin.
+  **Silence piloté par un point** (`quiet_when = "<instance>:<appareil>/<clé>"`) : tant que ce
+  point de la maison vaut `true` (une aide « Ne pas déranger » qu'un automatisme allume selon
+  l'heure et le genre du jour, par exemple), rien n'est dit non plus, quelle que soit
+  l'origine. Un point faux, inconnu ou pas encore là ne fait pas taire. Un point mal écrit est
+  refusé avec les options (`moli-os check-config`).
   Tout ce qui n'est pas propre au Sonos (le texte vérifié, la file de 3 au plus, l'abandon
   après 30 s d'attente, `quiet`, les heures calmes, `announce_volume`, `speaking`, la synthèse et la publication du son) est
-  dans `crates/moli-announce`, pour toute enceinte qui parle ; le Sonos n'y ajoute que le clip
+  dans `crates/moli-announce` (avec `quiet_when`), pour toute enceinte qui parle ; le Sonos n'y ajoute que le clip
   (`moli_announce::Speaker`), comme [`airplay`](#airplay--annonces-sur-un-récepteur-airplay-1-cratesmoli-airplay) le RAOP
   et [`cast`](#cast--annonces-sur-une-enceinte-google-cast-cratesmoli-cast) Google Cast.
 - **Pièges** : description injoignable au démarrage = échec du pilote, relancé par le superviseur. Pas de gestion des groupes Sonos.
@@ -933,7 +938,8 @@ host = "192.168.1.x"
 - **Configuration** : `host`, et `port` (5000 ; le recopier de l'enregistrement SRV
   `_raop._tcp` quand il diffère), `tts` (`127.0.0.1:10200`), `voice`, `volume` (le niveau de
   départ des annonces, 40), `quiet_hours` (`false` ; `true` : rien n'est dit pendant les
-  heures calmes de la maison).
+  heures calmes de la maison), `quiet_when` (un point de la maison : rien n'est dit tant qu'il
+  vaut `true`).
 
 ```toml
 [[driver]]
@@ -994,7 +1000,8 @@ host = "192.168.1.x"
   Moli à `media_base`.
 - **Configuration** : `host`, `media_base` (Moli tel que l'enceinte le joint), et `port`
   (8009), `tts` (`127.0.0.1:10200`), `voice`, `volume` (le niveau de départ des annonces, 50),
-  `quiet_hours` (`false` ; `true` : rien n'est dit pendant les heures calmes de la maison).
+  `quiet_hours` (`false` ; `true` : rien n'est dit pendant les heures calmes de la maison),
+  `quiet_when` (un point de la maison : rien n'est dit tant qu'il vaut `true`).
 
 ```toml
 [[driver]]
@@ -1004,6 +1011,7 @@ kind = "cast"
 host = "192.168.1.x"
 media_base = "http://192.168.1.y:8790"
 quiet_hours = true
+quiet_when = "maison:ne_pas_deranger/on"   # facultatif
 ```
 
 - **Secrets** : aucun à fournir ; `cast_identity`, l'empreinte du certificat d'identité, est
