@@ -52,7 +52,14 @@ Les compteurs cumulés deviennent des **kWh et des euros heure par heure**, gard
     `grdf` ; pour le gaz, `role = "gas"`, en kWh, sans `kwh_per_unit`). Chaque
     heure est classée à sa place, jamais étalée sur le moment du relevé ; ce qui est déjà classé
     reste. Le prix vient de `price`, pas de la période tarifaire. Si tous les compteurs `grid` et
-    `total` sont ainsi en retard, la projection du mois s'arrête à la dernière heure reçue.
+    `total` sont ainsi en retard (ou tous les compteurs `gas`), la projection du mois de cette
+    énergie se fait sur les **heures reçues** : un jour manquant (service en panne) ne compte ni
+    comme vide ni comme écoulé (`latest::reach`). Le résumé donne alors aussi `last_days` : pour
+    chaque énergie en retard, son dernier jour reçu et la moyenne des 7 jours précédents qui ont
+    un relevé (`latest::last_days`). Le jour du gaz est la **journée gazière**, de 6 h à 6 h (heure
+    locale, celle que GRDF publie et facture) : « le 20 » du gaz est ce que GRDF dit du 20, pas un
+    jour de minuit à minuit fait de deux journées gazières. L'historique, lui, reste découpé par
+    heure et par jour du calendrier.
   - `feeds = ["<device id>"]` : les appareils qu'un compteur alimente (par exemple le
     circuit d'une clim → cette clim) : leur carte montre sa puissance (« circuit partagé »
     s'il alimente autre chose). Les adaptateurs Daikin BRP069 vérifiés ne mesurent **pas**
