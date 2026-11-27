@@ -1067,7 +1067,8 @@ host = "192.168.1.x"
 - **Secrets** : aucun.
 - **Points** : `playing` (lecture/pause), `volume` (0-100 %), `mute` **écrivables** ; `state`, `title`, `artist` en lecture (métadonnées DIDL échappées).
 - **Identité** : UDN UPnP. Nom et pièce natifs = `roomName` Sonos.
-- **Annonces vocales** (`[driver.options.announce]` : `media_base`, `tts`, `voice`, `volume`) :
+- **Annonces vocales** (`[driver.options.announce]` : `media_base`, `tts`, `voice`, `volume`,
+  `quiet_hours`) :
   un point `announce` (texte, écriture seule), et `announce_volume` (0-100 %, **écrivable**) :
   le niveau auquel une annonce est dite. Il part du `volume` de la configuration, puis garde la
   dernière valeur écrite, redémarrage compris ; l'écrire passe par la garde comme le reste. Le
@@ -1084,10 +1085,15 @@ host = "192.168.1.x"
   l'annonce pendant que l'enceinte les dit (dès que le clip est `ACTIVE`), vide une fois dits :
   un [satellite vocal](satellite-vocal.md) qui répond par l'enceinte (`speaker`) attend la fin
   avant de se remettre à écouter.
+  **Heures calmes** (`quiet_hours = true`) : pendant les `[guard.quiet_hours]` de la maison (et
+  de la pièce de l'enceinte quand elles en visent), rien n'est dit, quelle que soit l'origine :
+  un automatisme aussi, que la garde laisse pourtant passer. Comme avec `quiet`, l'annonce est
+  écartée (journalisée), pas gardée pour le matin.
   Tout ce qui n'est pas propre au Sonos (le texte vérifié, la file de 3 au plus, l'abandon
-  après 30 s d'attente, `quiet`, `announce_volume`, `speaking`, la synthèse et la publication du son) est
+  après 30 s d'attente, `quiet`, les heures calmes, `announce_volume`, `speaking`, la synthèse et la publication du son) est
   dans `crates/moli-announce`, pour toute enceinte qui parle ; le Sonos n'y ajoute que le clip
-  (`moli_announce::Speaker`), comme [`airplay`](#airplay--annonces-sur-un-récepteur-airplay-1-cratesmoli-airplay) le RAOP.
+  (`moli_announce::Speaker`), comme [`airplay`](#airplay--annonces-sur-un-récepteur-airplay-1-cratesmoli-airplay) le RAOP
+  et [`cast`](#cast--annonces-sur-une-enceinte-google-cast-cratesmoli-cast) Google Cast.
 - **Pièges** : description injoignable au démarrage = échec du pilote, relancé par le superviseur. Pas de gestion des groupes Sonos.
 - **Tests** : lecture du SOAP et du DIDL doublement échappé.
 
@@ -1108,7 +1114,8 @@ host = "192.168.1.x"
   d'horloge répondues. Le son de Piper est rééchantillonné à 44,1 kHz (`moli-audio`).
 - **Configuration** : `host`, et `port` (5000 ; le recopier de l'enregistrement SRV
   `_raop._tcp` quand il diffère), `tts` (`127.0.0.1:10200`), `voice`, `volume` (le niveau de
-  départ des annonces, 40).
+  départ des annonces, 40), `quiet_hours` (`false` ; `true` : rien n'est dit pendant les
+  heures calmes de la maison).
 
 ```toml
 [[driver]]
@@ -1144,6 +1151,58 @@ host = "192.168.1.x"
   réponses appariées par `CSeq`, le refus distingué de l'absence, le son tiré d'un WAV ; dans
   un vrai `Hub`, le volume lu au démarrage puis écrit, une rafale de volumes, et le refus au
   démarrage, par le TXT ou par la session.
+
+## `cast` : annonces sur une enceinte Google Cast (`crates/moli-cast`)
+
+- **Couvre** : une enceinte Google Cast par instance (Google Home, Nest Mini, Nest Audio), pour
+  des **annonces** seulement (pas de musique, pas de groupe d'enceintes).
+- **Protocole** : Google Cast v2, dans `moli-net::cast` (le même cadre que `androidtv`) : TLS
+  sur **8009**, des trames de 4 octets de longueur puis une enveloppe protobuf autour de JSON.
+  ⚠️ L'enceinte **régénère son certificat TLS** (au plus tard chaque jour, à chaque
+  redémarrage) : l'épingler casse les annonces le lendemain. Ce qui est épinglé au premier
+  contact, c'est son **identité** (secret `cast_identity`) : le certificat qu'elle présente par
+  DeviceAuth (`urn:x-cast:com.google.cast.tp.deviceauth`). À chaque connexion, Moli lui envoie
+  un nonce de 32 octets ; elle signe (RSA PKCS#1, SHA-256) ce nonce suivi du certificat TLS de
+  la connexion avec la clé de cette identité. Un autre nonce, un autre algorithme, une autre
+  identité ou un autre certificat TLS : refusé. Le mécanisme vient du travail de supermomo31
+  sur Cast (#129). Au démarrage, le journal dit l'identité et les validités des deux
+  certificats (`cast speaker authenticated`). Une annonce, comme
+  `tts.speak` de Home Assistant : le volume de l'enceinte est lu (`GET_STATUS`), celui de
+  l'annonce réglé (`SET_VOLUME`), le *Default Media Receiver* de Google lancé (`LAUNCH`
+  `CC1AD845`), le son chargé (`LOAD`, `audio/wav`) depuis l'adresse où Moli le publie, suivi
+  jusqu'à `IDLE` / `FINISHED`, puis l'appli arrêtée (`STOP`) et le volume d'avant remis,
+  même quand le son a échoué. Le son est dit par **Piper en local** (Wyoming), publié 5 minutes
+  sous un nom imprévisible (`GET /api/media/<128 bits>.wav`) : l'enceinte doit pouvoir joindre
+  Moli à `media_base`.
+- **Configuration** : `host`, `media_base` (Moli tel que l'enceinte le joint), et `port`
+  (8009), `tts` (`127.0.0.1:10200`), `voice`, `volume` (le niveau de départ des annonces, 50),
+  `quiet_hours` (`false` ; `true` : rien n'est dit pendant les heures calmes de la maison).
+
+```toml
+[[driver]]
+id = "home_mini"
+kind = "cast"
+[driver.options]
+host = "192.168.1.x"
+media_base = "http://192.168.1.y:8790"
+quiet_hours = true
+```
+
+- **Secrets** : aucun à fournir ; `cast_identity`, l'empreinte du certificat d'identité, est
+  gardée au premier contact.
+- **Points** : ceux de `moli-announce`, comme pour le Sonos et l'AirPlay (`announce`,
+  `announce_volume`, `quiet`, `quiet_until`, `speaking` dès que l'enceinte passe à `PLAYING`).
+- **Pièges** : ⚠️ **ce que l'enceinte jouait s'arrête** (radio, musique castée depuis un
+  téléphone) : le *Default Media Receiver* prend sa place, comme avec Home Assistant. La
+  présence est testée par une simple connexion TCP, qui ne coupe rien. Une annonce qui n'est
+  pas finie dans sa durée plus 30 s est abandonnée.
+- **Identité** : l'adresse `host`.
+- **Tests** : DeviceAuth sur des signatures réelles (l'identité qui couvre le certificat TLS
+  qu'elle a signé, pas un autre ; une autre identité, un nonce rejoué, un algorithme dégradé ou
+  une réponse refusée : refusés), une annonce entière contre une fausse enceinte (l'ordre des messages, le volume
+  de l'annonce puis celui d'avant, l'adresse et le type du son, la session arrêtée), un son
+  refusé ou coupé (`LOAD_FAILED`, `ERROR`, `INTERRUPTED`) qui remet quand même l'enceinte, une
+  enceinte muette abandonnée à temps, la durée lue dans l'en-tête du WAV.
 
 ## `philips` : télé Philips Android (`crates/moli-philips`)
 

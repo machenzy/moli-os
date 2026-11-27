@@ -316,7 +316,8 @@ async fn run(config: &Config, ctx: &mut DriverCtx) -> anyhow::Result<()> {
             ctx.media_publisher(),
         )),
         None => None,
-    });
+    })
+    .keeping_quiet_hours(config.announce.as_ref().is_some_and(|a| a.quiet_hours));
     ctx.upsert_device(device(ctx, &id, &room, &model, &announcements));
     announcements.start(ctx, &id);
     ctx.ready();

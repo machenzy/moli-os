@@ -202,6 +202,19 @@ impl QuietHours {
         }
     }
 
+    /// The window, as the house reads it (`22:00 → 07:00`), when `now`
+    /// is inside it for a device in `rooms`.
+    #[must_use]
+    pub fn now_for(&self, rooms: &[&str], now: Timestamp) -> Option<String> {
+        (self.covers(rooms) && self.contains(now)).then(|| {
+            format!(
+                "{} → {}",
+                self.from.strftime("%H:%M"),
+                self.to.strftime("%H:%M")
+            )
+        })
+    }
+
     fn covers(&self, rooms: &[&str]) -> bool {
         self.rooms.is_empty()
             || rooms

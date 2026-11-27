@@ -333,6 +333,16 @@ impl DriverCtx {
         self.remember_address(address).await;
     }
 
+    /// The house's quiet hours over one of this instance's devices now
+    /// (`22:00 → 07:00`), `None` outside them.
+    #[must_use]
+    pub fn quiet_hours_now(&self, device: &DeviceId) -> Option<String> {
+        if !self.owns(device) {
+            return None;
+        }
+        self.hub.quiet_hours_now(device)
+    }
+
     /// The current value of one of this instance's points (restored from
     /// the state cache after a restart), if any.
     #[must_use]

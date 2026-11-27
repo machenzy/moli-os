@@ -133,6 +133,7 @@
   "pilotes.airplay.volume_non_regle": "le volume n'a pas été réglé : {error}",
   "pilotes.airplay.ne_se_regle_pas": "{point} ne peut pas être réglé",
   "pilotes.airplay.refuse": "le récepteur AirPlay {host} ne prend pas le son en clair : ce pilote ne parle qu'à un récepteur AirPlay 1 sans chiffrement, sans mot de passe ni appairage (dans son annonce _raop._tcp : un 0 dans et et dans cn, aucun bit AirPlay 2 dans ft, ni pw=true ni 0x8, 0x80 ou 0x200 dans sf). Retirez le mot de passe AirPlay du récepteur s'il en a un ; sinon retirez cette instance : un HomePod, une Apple TV récente, un Mac, une Sonos AirPlay 2 ou une AirPort Express ne conviennent pas",
+  "pilotes.cast.ne_se_regle_pas": "{point} ne peut pas être réglé",
   "pilotes.sonos.lecture": "Lecture",
   "pilotes.sonos.volume": "Volume",
   "pilotes.sonos.sourdine": "Sourdine",

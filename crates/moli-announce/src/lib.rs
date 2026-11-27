@@ -2,7 +2,9 @@
 //! words checked, a short queue said one at a time (dropped when stale), the
 //! speech made by a local Piper server (Wyoming), the level an announcement
 //! is said at (`announce_volume`), `quiet`, a silence that ends by itself
-//! after [`QUIET_FOR`], and `speaking`, the words being said.
+//! after [`QUIET_FOR`], the house's quiet hours when the speaker keeps them
+//! ([`Announcements::keeping_quiet_hours`]), and `speaking`, the words
+//! being said.
 //!
 //! How the sound reaches the speaker is the driver's own: [`Speaker::play`].
 //! A driver keeps one [`Announcements`], adds its [`points`](Announcements::points)
@@ -237,6 +239,8 @@ pub struct Announcements {
     quiet_until: Option<u64>,
     /// What the speaker is saying, as the announcer tells it.
     speaking: Option<watch::Receiver<Option<String>>>,
+    /// Nothing is said during the house's quiet hours (`[guard.quiet_hours]`).
+    quiet_hours: bool,
 }
 
 impl Announcements {
@@ -247,7 +251,18 @@ impl Announcements {
             announcer,
             quiet_until: None,
             speaking,
+            quiet_hours: false,
         }
+    }
+
+    /// Says nothing during the house's quiet hours (`[guard.quiet_hours]`,
+    /// for the speaker's room), whoever asks: an automation too, which the
+    /// guard itself always obeys. As with `quiet`, an announcement then is
+    /// dropped, not kept for the morning.
+    #[must_use]
+    pub fn keeping_quiet_hours(mut self, keep: bool) -> Self {
+        self.quiet_hours = keep;
+        self
     }
 
     /// The points a speaker that speaks has: none without announcements.
@@ -358,6 +373,11 @@ impl Announcements {
                 if self.quiet_until.is_some_and(|u| u > moli_core::now_ms()) {
                     // Silenced: nothing said, nobody bothered with an error.
                     tracing::info!("announcement not said: announcements are silenced");
+                    Ok(())
+                } else if let Some(window) =
+                    self.quiet_hours.then(|| ctx.quiet_hours_now(id)).flatten()
+                {
+                    tracing::info!(%window, "announcement not said: quiet hours");
                     Ok(())
                 } else {
                     speak(self.announcer.as_ref(), &command.value)
@@ -737,5 +757,124 @@ mod tests {
         settled(&hub, &until, &Value::Int(0)).await;
         cancel.cancel();
         task.await.unwrap();
+    }
+
+    /// A speaker that keeps the house's quiet hours, or not; the announcer
+    /// it made is left in `made`, to see what it was given.
+    #[derive(Debug)]
+    struct Night {
+        keep: bool,
+        tts: String,
+        made: Arc<std::sync::Mutex<Option<Arc<Announcer>>>>,
+    }
+
+    impl moli_runtime::Driver for Night {
+        fn kind(&self) -> &'static str {
+            "night"
+        }
+
+        fn run<'a>(&'a self, ctx: &'a mut DriverCtx) -> BoxFuture<'a, anyhow::Result<()>> {
+            Box::pin(async move {
+                let id = ctx.device_id("speaker");
+                let speech = Speech {
+                    tts: self.tts.clone(),
+                    voice: None,
+                };
+                let announcer = Announcer::new(Mute, speech, 35, ctx.media_publisher());
+                *self.made.lock().unwrap() = Some(Arc::clone(&announcer));
+                let mut announcements =
+                    Announcements::new(Some(announcer)).keeping_quiet_hours(self.keep);
+                ctx.upsert_device(moli_core::Device {
+                    id: id.clone(),
+                    instance: ctx.instance().clone(),
+                    native_name: "Night".into(),
+                    manufacturer: None,
+                    model: None,
+                    description: None,
+                    native_room: None,
+                    members: Vec::new(),
+                    points: announcements.points(),
+                });
+                announcements.start(ctx, &id);
+                ctx.ready();
+                while let Some(command) = ctx.next_command().await {
+                    let result = announcements
+                        .command(ctx, &id, &command)
+                        .unwrap_or_else(|| Err("not an announcement".into()));
+                    command.reply(result);
+                }
+                Ok(())
+            })
+        }
+    }
+
+    /// Quiet hours all day long, over the whole house: an automation's
+    /// announcement is dropped by a speaker that keeps them, said by one
+    /// that does not (the guard itself lets an automation through).
+    #[tokio::test]
+    async fn a_speaker_keeping_quiet_hours_says_nothing_then() {
+        use moli_core::{InstanceId, Origin, PointId};
+        use moli_runtime::guard::{GuardPolicy, QuietHours};
+        use moli_runtime::{Hub, HubOptions, spawn_driver};
+        use tokio_util::sync::CancellationToken;
+
+        // A speech server that never answers: an announcement queued waits.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let tts = silent.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((tcp, _)) = silent.accept().await {
+                held.push(tcp);
+            }
+        });
+        let noon = jiff::civil::time(12, 0, 0, 0);
+        let hub = Hub::new(HubOptions {
+            guard: GuardPolicy {
+                quiet_hours: Some(QuietHours {
+                    from: noon,
+                    to: noon,
+                    tz: jiff::tz::TimeZone::UTC,
+                    tz_name: "UTC".into(),
+                    rooms: Vec::new(),
+                }),
+                ..GuardPolicy::default()
+            },
+            ..HubOptions::default()
+        })
+        .unwrap();
+        for (keep, waiting) in [(true, 0), (false, 1)] {
+            let made = Arc::default();
+            let cancel = CancellationToken::new();
+            let instance = if keep { "night" } else { "day" };
+            let task = spawn_driver(
+                &hub,
+                InstanceId::from(instance),
+                Arc::new(Night {
+                    keep,
+                    tts: tts.clone(),
+                    made: Arc::clone(&made),
+                }),
+                cancel.clone(),
+            );
+            let quiet = PointId::from(format!("{instance}:speaker/quiet"));
+            settled(&hub, &quiet, &Value::Bool(false)).await;
+            let announce = PointId::from(format!("{instance}:speaker/announce"));
+            hub.command(
+                &announce,
+                Value::Text("Le linge est prêt.".into()),
+                Origin::Automation,
+                None,
+            )
+            .await
+            .unwrap();
+            let announcer = made.lock().unwrap().clone().unwrap();
+            assert_eq!(
+                announcer.waiting.load(Ordering::SeqCst),
+                waiting,
+                "keep: {keep}"
+            );
+            cancel.cancel();
+            task.await.unwrap();
+        }
     }
 }
